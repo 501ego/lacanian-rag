@@ -2,12 +2,12 @@
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 import numpy as np
 import faiss
 from tqdm import tqdm
-from config import AppConfig
-from openai_client import OpenAIClient, load_openai_config
+from ..core.config import AppConfig
+from .openai_client import OpenAIClient, load_openai_config
 
 APP_CONFIG = AppConfig()
 
@@ -102,6 +102,86 @@ class FaissIndexBuilder:
                       f, ensure_ascii=False, indent=2)
 
         print(f"FAISS index saved with {len(chunk_records)} entries.")
+
+
+class FaissIndexUpdater:
+    """Append new embeddings and metadata to an existing FAISS index."""
+
+    def __init__(
+        self,
+        index_path: Path,
+        metadata_path: Path,
+        embedding_dim: int,
+        embedder_instance: OpenAIEmbedder,
+    ):
+        self._index_path = index_path
+        self._metadata_path = metadata_path
+        self._embedding_dim = embedding_dim
+        self._embedder = embedder_instance
+
+    def append(self, chunk_records: List[Dict[str, Any]]) -> int:
+        """Append chunk records to the index and metadata store."""
+        if not chunk_records:
+            return 0
+        ids, metadata = self._load_metadata()
+        existing_ids = set(ids)
+        embeddings = []
+        new_ids = []
+        new_metadata = []
+        for chunk in chunk_records:
+            chunk_id = chunk.get("id")
+            if not chunk_id or chunk_id in existing_ids:
+                continue
+            embedding = self._embedder.embed(chunk["text"])
+            embeddings.append(embedding)
+            new_ids.append(chunk_id)
+            new_metadata.append(chunk["metadata"])
+
+        if not embeddings:
+            return 0
+
+        embeddings_np = np.array(embeddings, dtype="float32")
+        if embeddings_np.ndim == 1:
+            embeddings_np = embeddings_np.reshape(1, -1)
+        if embeddings_np.shape[1] != self._embedding_dim:
+            raise ValueError(
+                f"Embedding dim mismatch: expected {self._embedding_dim}, got {embeddings_np.shape[1]}"
+            )
+
+        index = self._load_or_create_index()
+        if index.d != self._embedding_dim:
+            raise ValueError(
+                f"Index dim mismatch: expected {self._embedding_dim}, got {index.d}"
+            )
+        index.add(embeddings_np)
+
+        ids.extend(new_ids)
+        metadata.extend(new_metadata)
+
+        self._index_path.parent.mkdir(exist_ok=True)
+        faiss.write_index(index, str(self._index_path))
+
+        self._metadata_path.parent.mkdir(exist_ok=True)
+        with open(self._metadata_path, "w", encoding="utf-8") as f:
+            json.dump({"ids": ids, "metadata": metadata},
+                      f, ensure_ascii=False, indent=2)
+        return len(new_ids)
+
+    def _load_or_create_index(self):
+        if self._index_path.exists():
+            return faiss.read_index(str(self._index_path))
+        return faiss.IndexFlatL2(self._embedding_dim)
+
+    def _load_metadata(self) -> Tuple[List[str], List[Dict[str, Any]]]:
+        if not self._metadata_path.exists():
+            return [], []
+        with open(self._metadata_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        ids = payload.get("ids", [])
+        metadata = payload.get("metadata", [])
+        if not isinstance(ids, list) or not isinstance(metadata, list):
+            return [], []
+        return ids, metadata
 
 
 if __name__ == "__main__":

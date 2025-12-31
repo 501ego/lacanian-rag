@@ -33,17 +33,24 @@ Do not skip this step. Assume the user will paste or describe the current struct
 Read this first. It is the fast map of how the repo is organized and how changes must be applied.
 
 Pipeline map:
-`config.py` -> `openai_client.py` -> `retriever.py` -> `rag_services.py` -> `query.py` (orchestration)
-Ingestion: `text_extractor.py` -> `embed_chunks.py`
+`app/core/config.py` -> `app/infrastructure/openai_client.py` -> `app/infrastructure/retriever.py`
+-> `app/application/rag_services.py` -> `app/application/rag_query.py` -> `app/interfaces/api.py` or `app/interfaces/cli.py`
+Ingestion: `app/infrastructure/text_extractor.py` -> `app/infrastructure/embed_chunks.py`
+Indexing use case: `app/application/index_text.py`
 
 Ownership rules (do not cross):
-- `config.py`: all constants (paths, limits, labels, JSON keys, UI text). No ad-hoc globals.
-- `openai_client.py`: only OpenAI SDK entry point (chat/translate/embed).
-- `retriever.py`: index loading + vector search (`IndexStore`, `OpenAIEmbedder`, `Retriever`).
-- `rag_services.py`: prompt building + response processing + audit logging.
-- `query.py`: orchestration only (input -> retrieval -> prompt -> response -> output).
-- `text_extractor.py`: PDF chunking (`PDFChunker`).
-- `embed_chunks.py`: embedding + FAISS build (`ChunkLoader`, `FaissIndexBuilder`).
+- `app/core/config.py`: all constants (paths, limits, labels, JSON keys, UI text). No ad-hoc globals.
+- `app/domain/*.py`: Lacan canon and lesson labels.
+- `app/infrastructure/openai_client.py`: only OpenAI SDK entry point (chat/translate/embed).
+- `app/infrastructure/retriever.py`: index loading + vector search (`IndexStore`, `OpenAIEmbedder`, `Retriever`).
+- `app/application/rag_services.py`: prompt building + response processing + audit logging.
+- `app/application/rag_query.py`: RAG use case orchestration (input -> retrieval -> prompt -> response -> output).
+- `app/application/index_text.py`: raw text chunking + index append orchestration.
+- `app/infrastructure/text_extractor.py`: PDF chunking (`PDFChunker`, `TextChunker`).
+- `app/infrastructure/embed_chunks.py`: embedding + FAISS build (`ChunkLoader`, `FaissIndexBuilder`, `FaissIndexUpdater`).
+- `app/interfaces/api.py`: FastAPI wiring and HTTP concerns.
+- `app/interfaces/cli.py`: CLI entry point for RAG queries.
+- `app/interfaces/verify.py`: CLI utility for verifying PDF coverage.
 
 If you move responsibilities, update this section to match.
 

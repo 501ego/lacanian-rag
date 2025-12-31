@@ -1,9 +1,8 @@
-"""Query entry point for Lacanian RAG answers."""
+"""RAG query use case."""
 
-import json
-import sys
+from typing import Any, Callable, Dict, Optional, Tuple
 from openai import OpenAIError
-from config import (
+from ..core.config import (
     AppConfig,
     JSON_KEYS,
     LANGUAGE_NAMES,
@@ -12,36 +11,45 @@ from config import (
     UI_TEXT,
     UNKNOWN_LECON,
 )
-from openai_client import OpenAIClient, load_openai_config
-from rag_services import AuditLogger, PromptBuilder, ResponseProcessor
-from retriever import search_similar_chunks
+from ..infrastructure.openai_client import OpenAIClient, load_openai_config
+from .rag_services import AuditLogger, PromptBuilder, ResponseProcessor
+from ..infrastructure.retriever import search_similar_chunks
 
 APP_CONFIG = AppConfig()
 openai_client = OpenAIClient(load_openai_config())
 
 
-def choose_language() -> str:
-    """Prompt until a supported language code is selected."""
-    while True:
-        choice = input("Choose language (en/es): ").strip().lower()
-        if choice in LANGUAGE_NAMES:
-            return choice
-        print("Please choose 'en' or 'es'.")
+def run_rag_query(
+    question: str,
+    language_code: str,
+    *,
+    top_k: Optional[int] = None,
+    max_sources: Optional[int] = None,
+    audit: bool = True,
+    on_generate: Optional[Callable[[], None]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Run a full RAG query and return the JSON payload plus warnings."""
+    if not question or not question.strip():
+        raise ValueError("Question cannot be empty.")
+    if language_code not in LANGUAGE_NAMES:
+        raise ValueError("Unsupported language code.")
 
-
-def query_lacan(question: str, language_code: str) -> None:
-    """Run a full RAG query and print JSON output."""
+    warnings: Dict[str, Any] = {
+        "translation_error": None,
+        "validation_errors": [],
+    }
     ui_text = UI_TEXT
-    print(ui_text["searching"])
     language_name = LANGUAGE_NAMES[language_code]
     try:
         question_fr = openai_client.translate(
             question, language_name, "French")
     except OpenAIError as exc:
-        print(ui_text["translation_error"].format(error=exc))
+        warnings["translation_error"] = ui_text["translation_error"].format(
+            error=exc
+        )
         question_fr = question
 
-    chunks = search_similar_chunks(question_fr, top_k=APP_CONFIG.top_k)
+    chunks = search_similar_chunks(question_fr, top_k=top_k or APP_CONFIG.top_k)
     seen = set()
     unique_chunks = []
     for chunk in chunks:
@@ -49,7 +57,7 @@ def query_lacan(question: str, language_code: str) -> None:
         if key not in seen:
             seen.add(key)
             unique_chunks.append(chunk)
-    selected_chunks = unique_chunks[:APP_CONFIG.max_sources]
+    selected_chunks = unique_chunks[: max_sources or APP_CONFIG.max_sources]
 
     prompt_builder = PromptBuilder(
         chunks_dir=APP_CONFIG.chunks_dir,
@@ -62,16 +70,17 @@ def query_lacan(question: str, language_code: str) -> None:
     prompt, source_entries, context_text = prompt_builder.build(
         question, selected_chunks, language_code
     )
-    audit_logger = AuditLogger(APP_CONFIG.audit_dir)
-    audit_logger.save_context(
-        question, question_fr, language_code, source_entries, context_text
-    )
+    audit_logger = AuditLogger(APP_CONFIG.audit_dir) if audit else None
+    if audit_logger:
+        audit_logger.save_context(
+            question, question_fr, language_code, source_entries, context_text
+        )
 
     if not prompt:
-        print(f"\n{ui_text['context_error']}")
-        return
+        raise ValueError(ui_text["context_error"])
 
-    print(f"\n{ui_text['generating']}\n")
+    if on_generate:
+        on_generate()
     messages = [
         {
             "role": "system",
@@ -95,19 +104,17 @@ def query_lacan(question: str, language_code: str) -> None:
     )
     parsed_response = response_processor.parse(response_text)
     if not parsed_response:
-        print(f"\n{ui_text['validation_error']}", file=sys.stderr)
-        print(response_text, file=sys.stderr)
-        audit_logger.save_response(response_text, None)
-        return
+        if audit_logger:
+            audit_logger.save_response(response_text, None)
+        raise ValueError(ui_text["validation_error"])
 
     normalized_response = response_processor.normalize(
         parsed_response, len(source_entries), language_code, context_text
     )
     if not normalized_response:
-        print(f"\n{ui_text['validation_error']}", file=sys.stderr)
-        print(response_text, file=sys.stderr)
-        audit_logger.save_response(response_text, None)
-        return
+        if audit_logger:
+            audit_logger.save_response(response_text, None)
+        raise ValueError(ui_text["validation_error"])
 
     response_processor.align_quotes_to_context(
         normalized_response, context_text)
@@ -116,9 +123,7 @@ def query_lacan(question: str, language_code: str) -> None:
         normalized_response, len(source_entries), language_code, context_text
     )
     if errors:
-        print(f"\n{ui_text['validation_error']}", file=sys.stderr)
-        for error in errors:
-            print(f"- {error}", file=sys.stderr)
+        warnings["validation_errors"].extend(errors)
 
     enriched_sources = []
     for idx, source in enumerate(normalized_response[JSON_KEYS["sources"]]):
@@ -143,11 +148,6 @@ def query_lacan(question: str, language_code: str) -> None:
         source_entries
     )
 
-    audit_logger.save_response(response_text, output_payload)
-    print(json.dumps(output_payload, ensure_ascii=False, indent=2))
-
-
-if __name__ == "__main__":
-    selected_language = choose_language()
-    question_text = input(f"{UI_TEXT['ask_question']}: ")
-    query_lacan(question_text, selected_language)
+    if audit_logger:
+        audit_logger.save_response(response_text, output_payload)
+    return output_payload, warnings

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PyPDF2 import PdfReader
 
-from config import AppConfig
+from ..core.config import AppConfig
 
 LECON_REGEX = re.compile(
     r"(Le(?:ç|c)on\s+\d+\s+\d{1,2}\s+\w+\s+\d{4})", re.IGNORECASE)
@@ -125,6 +125,42 @@ class PDFChunker:
         """Process all PDFs in the input directory."""
         for pdf_file in self._input_dir.glob("*.pdf"):
             self.process_pdf_to_json(pdf_file)
+
+
+class TextChunker:
+    """Chunk raw text into overlapping segments."""
+
+    def __init__(self, chunk_size: int, overlap: int):
+        self._chunk_size = chunk_size
+        self._overlap = overlap
+
+    def chunk_text(self, text: str):
+        """Split text into chunks using word counts and overlap."""
+        cleaned = PDFChunker.clean_text(text)
+        words = cleaned.split()
+        if not words:
+            return []
+        step = self._chunk_size - self._overlap
+        if step <= 0:
+            raise ValueError("chunk_size must be larger than overlap.")
+        chunks = []
+        chunk_index = 0
+        start = 0
+        while start < len(words):
+            end = min(start + self._chunk_size, len(words))
+            content = " ".join(words[start:end]).strip()
+            chunks.append(
+                {
+                    "chunk_id": f"chunk_{chunk_index:03d}",
+                    "chunk_index": chunk_index,
+                    "text": content,
+                    "pages": [1],
+                }
+            )
+            if end >= len(words):
+                break
+            start += step
+            chunk_index += 1
 
 
 if __name__ == "__main__":

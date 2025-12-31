@@ -5,8 +5,8 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from lacan_canon import LACAN_CANON
-from lecon_labels import LECON_LABELS
+from ..domain.lacan_canon import LACAN_CANON
+from ..domain.lecon_labels import LECON_LABELS
 
 
 @dataclass(frozen=True)

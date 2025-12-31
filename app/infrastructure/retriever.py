@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import numpy as np
 import faiss
-from config import AppConfig
-from openai_client import OpenAIClient, load_openai_config
+from ..core.config import AppConfig
+from .openai_client import OpenAIClient, load_openai_config
 
 
 @dataclass(frozen=True)
@@ -97,6 +97,11 @@ class _RetrieverSingleton:
             cls._instance = cls._build()
         return cls._instance
 
+    @classmethod
+    def reset(cls) -> None:
+        """Clear the cached Retriever instance."""
+        cls._instance = None
+
     @staticmethod
     def _build() -> Retriever:
         """Construct a Retriever with default configuration."""
@@ -115,6 +120,11 @@ class _RetrieverSingleton:
 def get_default_retriever() -> Retriever:
     """Return the shared Retriever instance."""
     return _RetrieverSingleton.get_instance()
+
+
+def reset_default_retriever() -> None:
+    """Reset the shared Retriever instance."""
+    _RetrieverSingleton.reset()
 
 
 def search_similar_chunks(query: str, top_k: int = 5):
