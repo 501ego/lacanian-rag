@@ -1,3 +1,5 @@
+"""Lesson label mappings for Lacan seminars."""
+
 LECON_LABELS = {
   "en": {
     "Leçon_10__16_Juin_______1971": "Lesson 10 - Date 16 June 1971",

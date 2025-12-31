@@ -1,7 +1,11 @@
-from pathlib import Path
+"""Verify PDF processing coverage for chunked outputs."""
 
-pdf_dir = Path("data_pdfs")
-json_dir = Path("text_chunks_json")
+from config import AppConfig
+
+APP_CONFIG = AppConfig()
+
+pdf_dir = APP_CONFIG.input_pdf_dir
+json_dir = APP_CONFIG.output_dir
 
 # Normalize PDF filenames to match JSON naming convention
 pdf_files = sorted([

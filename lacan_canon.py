@@ -1,3 +1,5 @@
+"""Canonical seminar metadata used for labeling."""
+
 LACAN_CANON = {
     "es": {
         "S1_Ecrits_techniques": {"titulo": "Seminario 1: Los escritos técnicos de Freud", "fecha": "1953–1954"},

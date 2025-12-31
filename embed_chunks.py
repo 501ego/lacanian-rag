@@ -1,79 +1,123 @@
+"""Build embeddings and FAISS index from chunked texts."""
+
 import json
-import os
 from pathlib import Path
+from typing import Any, Dict, List
 import numpy as np
 import faiss
 from tqdm import tqdm
-from openai import OpenAI
-from dotenv import load_dotenv
-load_dotenv()
+from config import AppConfig
+from openai_client import OpenAIClient, load_openai_config
 
-key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=key)
-
-# Directories
-CHUNKS_DIR = Path("text_chunks_json")
-INDEX_DIR = Path("vector_index")
-INDEX_DIR.mkdir(exist_ok=True)
-
-# OpenAI embedding model
-EMBEDDING_MODEL = "text-embedding-3-large"
-EMBEDDING_DIM = 3072
+APP_CONFIG = AppConfig()
 
 
-def load_chunks():
-    """Load all chunked JSONs into a list of {id, text, metadata} dicts."""
-    data = []
-    for file in CHUNKS_DIR.glob("*.json"):
-        with open(file, "r", encoding="utf-8") as f:
-            chunks = json.load(f)
-            for chunk in chunks:
-                data.append({
-                    "id": f"{file.stem}_{chunk['chunk_id']}",
-                    "text": chunk["text"],
-                    "metadata": {
-                        "seminar": chunk.get("seminar"),
-                        "lecon": chunk.get("lecon"),
-                        "pages": chunk.get("pages")
-                    }
-                })
-    return data
+class ChunkLoader:
+    """Load chunked JSON files from disk."""
+
+    def __init__(self, chunks_dir: Path):
+        self._chunks_dir = chunks_dir
+
+    def load(self) -> List[Dict[str, Any]]:
+        """Load all chunked JSONs into a list of {id, text, metadata} dicts."""
+        records = []
+        for file in self._chunks_dir.glob("*.json"):
+            with open(file, "r", encoding="utf-8") as f:
+                chunk_items = json.load(f)
+                for chunk in chunk_items:
+                    records.append({
+                        "id": f"{file.stem}_{chunk['chunk_id']}",
+                        "text": chunk["text"],
+                        "metadata": {
+                            "seminar": chunk.get("seminar"),
+                            "lecon": chunk.get("lecon"),
+                            "pages": chunk.get("pages"),
+                        },
+                    })
+        return records
 
 
-def get_embedding(text):
-    response = client.embeddings.create(
-        input=text,
-        model=EMBEDDING_MODEL
-    )
-    return response.data[0].embedding
+class OpenAIEmbedder:
+    """Embed text using the OpenAI client."""
+
+    def __init__(self, client: OpenAIClient, model: str):
+        self._client = client
+        self._model = model
+
+    def embed(self, text: str) -> List[float]:
+        """Embed text with the configured model."""
+        return self._client.embed(text, model=self._model)
 
 
-def build_faiss_index(chunks):
-    index = faiss.IndexFlatL2(EMBEDDING_DIM)
-    metadata = []
-    ids = []
-    embeddings = []
+class FaissIndexBuilder:
+    """Build and persist a FAISS index with metadata."""
 
-    for chunk in tqdm(chunks, desc="Embedding chunks"):
-        embedding = get_embedding(chunk["text"])
-        embeddings.append(embedding)
-        metadata.append(chunk["metadata"])
-        ids.append(chunk["id"])
+    def __init__(
+        self,
+        index_path: Path,
+        metadata_path: Path,
+        embedding_dim: int,
+        embedder_instance: OpenAIEmbedder,
+    ):
+        self._index_path = index_path
+        self._metadata_path = metadata_path
+        self._embedding_dim = embedding_dim
+        self._embedder = embedder_instance
 
-    embeddings_np = np.array(embeddings).astype("float32")
-    index.add(embeddings_np)
+    def build(self, chunk_records: List[Dict[str, Any]]):
+        """Create a FAISS index from chunk embeddings and persist metadata."""
+        if not chunk_records:
+            print("No chunk records found. Skipping FAISS index build.")
+            return
 
-    faiss.write_index(index, str(INDEX_DIR / "lacan.index"))
+        index = faiss.IndexFlatL2(self._embedding_dim)
+        metadata = []
+        ids = []
+        embeddings = []
 
-    with open(INDEX_DIR / "metadata.json", "w", encoding="utf-8") as f:
-        json.dump({"ids": ids, "metadata": metadata},
-                  f, ensure_ascii=False, indent=2)
+        for chunk in tqdm(chunk_records, desc="Embedding chunks"):
+            embedding = self._embedder.embed(chunk["text"])
+            embeddings.append(embedding)
+            metadata.append(chunk["metadata"])
+            ids.append(chunk["id"])
 
-    print(f"FAISS index saved with {len(chunks)} entries.")
+        if not embeddings:
+            print("No embeddings generated. Skipping FAISS index build.")
+            return
+
+        embeddings_np = np.array(embeddings, dtype="float32")
+        if embeddings_np.ndim == 1:
+            embeddings_np = embeddings_np.reshape(1, -1)
+        if embeddings_np.shape[1] != self._embedding_dim:
+            raise ValueError(
+                f"Embedding dim mismatch: expected {self._embedding_dim}, got {embeddings_np.shape[1]}"
+            )
+        index.add(embeddings_np)
+
+        self._index_path.parent.mkdir(exist_ok=True)
+        faiss.write_index(index, str(self._index_path))
+
+        with open(self._metadata_path, "w", encoding="utf-8") as f:
+            json.dump({"ids": ids, "metadata": metadata},
+                      f, ensure_ascii=False, indent=2)
+
+        print(f"FAISS index saved with {len(chunk_records)} entries.")
 
 
 if __name__ == "__main__":
     print("Loading text chunks...")
-    chunks = load_chunks()
-    print(f"{len(chunks)} chunks loaded.")
-    build_faiss_index(chunks)
+    openai_client = OpenAIClient(load_openai_config())
+    chunk_loader = ChunkLoader(APP_CONFIG.chunks_dir)
+    chunk_records = chunk_loader.load()
+    print(f"{len(chunk_records)} chunks loaded.")
+    embedder = OpenAIEmbedder(
+        openai_client,
+        openai_client.config.embedding_model,
+    )
+    index_builder = FaissIndexBuilder(
+        index_path=APP_CONFIG.vector_index_path,
+        metadata_path=APP_CONFIG.metadata_path,
+        embedding_dim=APP_CONFIG.embedding_dim,
+        embedder_instance=embedder,
+    )
+    index_builder.build(chunk_records)

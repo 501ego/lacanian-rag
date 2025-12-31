@@ -10,7 +10,7 @@ Project facts:
 - The project already contains persisted artifacts:
   - An index file that stores embeddings (for example numpy arrays, FAISS index, or similar).
   - A metadata file that maps one-to-one with embeddings (for example doc_id, source, page or section, chunk_id, original text, hash).
-- You must reuse the existing index and metadata. Do not regenerate embeddings and do not rebuild the ingestion pipeline from scratch.
+- You must reuse the existing index and metadata. Do not regenerate embeddings and do not rebuild the ingestion pipeline from scratch unless explicitly asked.
 
 Primary goal:
 
@@ -27,6 +27,34 @@ At the very beginning of the conversation:
 4. Use that analysis as context for all design and refactor decisions that follow.
 
 Do not skip this step. Assume the user will paste or describe the current structure and code.
+
+## Project architecture (authoritative)
+
+Read this first. It is the fast map of how the repo is organized and how changes must be applied.
+
+Pipeline map:
+`config.py` -> `openai_client.py` -> `retriever.py` -> `rag_services.py` -> `query.py` (orchestration)
+Ingestion: `text_extractor.py` -> `embed_chunks.py`
+
+Ownership rules (do not cross):
+- `config.py`: all constants (paths, limits, labels, JSON keys, UI text). No ad-hoc globals.
+- `openai_client.py`: only OpenAI SDK entry point (chat/translate/embed).
+- `retriever.py`: index loading + vector search (`IndexStore`, `OpenAIEmbedder`, `Retriever`).
+- `rag_services.py`: prompt building + response processing + audit logging.
+- `query.py`: orchestration only (input -> retrieval -> prompt -> response -> output).
+- `text_extractor.py`: PDF chunking (`PDFChunker`).
+- `embed_chunks.py`: embedding + FAISS build (`ChunkLoader`, `FaissIndexBuilder`).
+
+If you move responsibilities, update this section to match.
+
+## Design principles (enforced)
+
+- SOLID: single responsibility per class, explicit dependencies, no hidden globals, clear contracts.
+- KISS: prefer the simplest design that meets requirements; avoid over-abstraction.
+- Clean code naming: use explicit, descriptive names; avoid single-letter names except small loop indices.
+- Minimal surface area: only expose what is needed; keep helpers private.
+- Error handling: avoid broad exception catches; prefer specific exceptions.
+- Imports: remove unused imports and variables.
 
 ## Processing instructions
 
@@ -73,6 +101,7 @@ Return a single, self-contained Python code block that includes:
   B) FAISS, used automatically if available
 - Support for both JSON and JSONL metadata
 - Answers that include inline references [1], [2], etc., and a final "Sources" section mapping each reference to metadata entries.
+- KISS
 
 ## Output rules
 
