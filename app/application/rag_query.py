@@ -36,6 +36,30 @@ def _log_stage(name: str, start: float) -> None:
     LOGGER.debug("RAG stage=%s duration_ms=%.2f", name, duration_ms)
 
 
+def _estimate_rag_max_tokens(detail_level: str, total_sources: int) -> int:
+    detail_level = (detail_level or "concise").lower().strip()
+    baseline_sources = max(APP_CONFIG.max_sources, 1)
+    extra_sources = max(0, total_sources - baseline_sources)
+    if detail_level == "full":
+        base_tokens = 2600
+        per_source = 450
+        cap_tokens = 6000
+    else:
+        base_tokens = 1200
+        per_source = 250
+        cap_tokens = 4000
+    return min(base_tokens + per_source * extra_sources, cap_tokens)
+
+
+def _estimate_expand_max_tokens(total_sources: int) -> int:
+    baseline_sources = max(APP_CONFIG.max_sources, 1)
+    extra_sources = max(0, total_sources - baseline_sources)
+    base_tokens = 2000
+    per_source = 150
+    cap_tokens = 3800
+    return min(base_tokens + per_source * extra_sources, cap_tokens)
+
+
 def _prepare_rag_query(
     question: str,
     language_code: str,
@@ -268,6 +292,7 @@ def run_rag_query(
     detail_level = prepared["detail_level"]
     audit_logger = prepared["audit_logger"]
     ui_text = UI_TEXT
+    max_tokens = _estimate_rag_max_tokens(detail_level, len(source_entries))
 
     if on_generate:
         on_generate()
@@ -282,7 +307,7 @@ def run_rag_query(
     response = openai_client.chat_completion(
         messages=messages,
         temperature=0.7,
-        max_tokens=1200 if detail_level == "concise" else 2600,
+        max_tokens=max_tokens,
         response_format={"type": "json_object"},
     )
     _log_stage("llm", llm_start)
@@ -405,6 +430,7 @@ Instructions:
 
 Begin your answer below:
 """
+    max_tokens = _estimate_expand_max_tokens(total_sources)
     llm_start = time.monotonic()
     response = openai_client.chat_completion(
         messages=[
@@ -415,7 +441,7 @@ Begin your answer below:
             {"role": "user", "content": prompt},
         ],
         temperature=0.7,
-        max_tokens=1800,
+        max_tokens=max_tokens,
         response_format={"type": "json_object"},
     )
     _log_stage("expand_llm", llm_start)
@@ -475,6 +501,7 @@ def run_rag_query_stream(
     retrieval_catalog = prepared["retrieval_catalog"]
     detail_level = prepared["detail_level"]
     audit_logger = prepared["audit_logger"]
+    max_tokens = _estimate_rag_max_tokens(detail_level, len(source_entries))
 
     yield "meta", {
         "language": language_code,
@@ -496,7 +523,7 @@ def run_rag_query_stream(
     for delta in openai_client.chat_completion_stream(
         messages=messages,
         temperature=0.7,
-        max_tokens=1200 if detail_level == "concise" else 2600,
+        max_tokens=max_tokens,
         response_format={"type": "json_object"},
     ):
         response_text_parts.append(delta)
@@ -631,7 +658,7 @@ Begin your answer below:
             {"role": "user", "content": prompt},
         ],
         temperature=0.7,
-        max_tokens=2000,
+        max_tokens=_estimate_expand_max_tokens(total_sources),
         response_format={"type": "json_object"},
     ):
         response_text_parts.append(delta)
