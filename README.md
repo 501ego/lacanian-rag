@@ -40,6 +40,21 @@ pip install fastapi uvicorn pydantic python-dotenv openai PyPDF2 faiss-cpu numpy
 pip install -r requirements.txt
 ```
 
+## Testing
+
+Run the unit tests:
+
+```bash
+pytest -q
+```
+
+Run coverage (requires `pytest-cov`):
+
+```bash
+pip install pytest-cov
+pytest --cov=app --cov-report=term-missing --cov-fail-under=90
+```
+
 ## Configure
 
 Set these environment variables (for example in `.env`):
@@ -95,12 +110,123 @@ fastapi run api.py
 
 Open `http://127.0.0.1:8000/docs` for Swagger UI.
 
-### Query endpoint
+## API
+
+Base URL: `http://127.0.0.1:8000`
+
+### POST /rag/query
+
+Run a RAG query against the existing FAISS index.
+
+Request body:
+
+```json
+{
+  "question": "What is the function of the gaze?",
+  "language": "en",
+  "detail": "concise",
+  "stream": false,
+  "top_k": 5,
+  "max_sources": 4,
+  "source_id": null
+}
+```
+
+Response shape:
+
+```json
+{
+  "result": {
+    "language": "en",
+    "sources": [
+      {
+        "source_index": 1,
+        "french_quotes": ["..."],
+        "translations": ["..."],
+        "translation_critique": "...",
+        "context": "...",
+        "lacanian_development": "...",
+        "source_metadata": {
+          "seminar_title": "Seminar XI",
+          "seminar_id": "Seminar_XI",
+          "lesson_label": "Lesson 1",
+          "lesson_raw": "Lecon_1",
+          "chunk_id": "chunk_001",
+          "chunk_index": 1,
+          "pages": [12, 13]
+        }
+      }
+    ],
+    "comparative_trajectory": "...",
+    "retrieval_catalog": [
+      {
+        "rank": 1,
+        "score": 0.123,
+        "seminar_id": "Seminar_XI",
+        "seminar_title": "Seminar XI",
+        "lesson_label": "Lesson 1",
+        "lesson_raw": "Lecon_1",
+        "chunk_id": "chunk_001",
+        "chunk_index": 1,
+        "full_id": "Seminar_XI_chunk_001",
+        "pages": [12, 13]
+      }
+    ],
+    "sources_catalog": [
+      {
+        "source_index": 1,
+        "seminar_title": "Seminar XI",
+        "seminar_id": "Seminar_XI",
+        "lesson_label": "Lesson 1",
+        "chunk_id": "chunk_001",
+        "chunk_index": 1,
+        "pages": [12, 13]
+      }
+    ]
+  },
+  "warnings": {
+    "translation_error": null,
+    "validation_errors": []
+  }
+}
+```
+
+Example curl:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/rag/query \
   -H "Content-Type: application/json" \
   -d '{"question":"What is the function of the gaze?","language":"en"}'
+```
+
+Streaming (SSE):
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/rag/query \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What is the function of the gaze?","language":"en","stream":true}'
+```
+
+### POST /rag/expand
+
+Generate a deep critical synthesis from a previous retrieval_catalog.
+
+```bash
+curl -X POST http://127.0.0.1:8000/rag/expand \
+  -H "Content-Type: application/json" \
+  -d '{"language":"en","retrieval_catalog":[{"rank":1,"seminar_id":"Seminar_XI","full_id":"Seminar_XI_chunk_001"}]}'
+```
+
+Set `stream: true` to receive SSE events (`meta`, `delta`, `done`, `error`).
+
+### POST /rag/index-text
+
+Upload a PDF, chunk it, and append embeddings to the FAISS index.
+
+```bash
+curl -X POST http://127.0.0.1:8000/rag/index-text \
+  -F "file=@data_pdfs/your.pdf" \
+  -F "doc_id=seminar_xi"
 ```
 
 ## RAG sequence flow
@@ -110,26 +236,36 @@ sequenceDiagram
     participant Client
     participant API as /rag/query
     participant Rag as run_rag_query
-    participant Trans as Translator
+    participant OpenAI as OpenAIClient
     participant Ret as Retriever
-    participant Chunks as ChunkRepository
-    participant Model as LLM (from .env)
+    participant Builder as PromptBuilder/ChunkRepository
+    participant Proc as ResponseProcessor
     participant Audit as AuditLogger
 
     Client->>API: POST {question, language, top_k?, max_sources?, source_id?}
     API->>Rag: run_rag_query(...)
-    Rag->>Trans: translate(question -> French)
-    Rag->>Ret: search_similar_chunks(question_fr, top_k, source_id?)
-    alt source_id provided
-        Ret->>Ret: oversample k and filter by seminar id
+    Rag->>Rag: validate inputs + resolve detail level
+    Rag->>OpenAI: translate(question -> French)
+    alt translation fails
+        Rag->>Rag: fallback to original question
     end
+    Rag->>Ret: search_similar_chunks(question_fr, top_k, source_id?)
+    alt source_id provided and no chunks
+        Rag-->>API: error (no chunks for source_id)
+    end
+    Rag->>Rag: build retrieval_catalog (labels + chunk ids)
     Rag->>Rag: dedupe + cap max_sources
-    Rag->>Chunks: load chunk text for context
-    Rag->>Audit: save_context(...)
-    Rag->>Model: prompt with context + JSON schema
-    Model-->>Rag: JSON response
-    Rag->>Rag: parse/normalize/validate
-    Rag->>Audit: save_response(...)
+    Rag->>Builder: build prompt + context + source_entries
+    alt audit enabled
+        Rag->>Audit: save_context(...)
+    end
+    Rag->>OpenAI: chat_completion(prompt)
+    OpenAI-->>Rag: JSON response text
+    Rag->>Proc: parse + normalize + align quotes + ensure translations + validate
+    Rag->>Rag: enrich sources + build sources_catalog
+    alt audit enabled
+        Rag->>Audit: save_response(...)
+    end
     Rag-->>API: payload + warnings
     API-->>Client: response
 ```

@@ -1,0 +1,14 @@
+import importlib
+
+import pytest
+
+MODULE_PATH = "{{ module_path }}"
+
+
+@pytest.fixture
+def module():
+    return importlib.import_module(MODULE_PATH)
+
+
+def test_import_smoke(module):
+    assert module is not None
