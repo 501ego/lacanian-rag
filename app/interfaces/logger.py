@@ -13,15 +13,16 @@ from fastapi import Request, Response
 
 REQUEST_ID_CTX: ContextVar[Optional[str]] = ContextVar(
     "request_id", default=None)
+TRACE_ID_CTX: ContextVar[Optional[str]] = ContextVar(
+    "trace_id", default=None)
 
 
 class RequestIdFilter(logging.Filter):
     """Inject request id into log records."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        request_id = REQUEST_ID_CTX.get() or "-"
-        record.request_id = request_id
-        record.trace_id = uuid4()
+        record.request_id = REQUEST_ID_CTX.get() or "-"
+        record.trace_id = TRACE_ID_CTX.get() or "-"
         return True
 
 
@@ -81,7 +82,9 @@ def request_logging_middleware(logger: logging.Logger):
 
     async def middleware(request: Request, call_next):
         request_id = request.headers.get("X-Request-Id") or uuid4().hex
-        token = REQUEST_ID_CTX.set(request_id)
+        trace_id = uuid4().hex
+        request_token = REQUEST_ID_CTX.set(request_id)
+        trace_token = TRACE_ID_CTX.set(trace_id)
         start = time.monotonic()
         response: Optional[Response] = None
         path = request.url.path
@@ -133,6 +136,7 @@ def request_logging_middleware(logger: logging.Logger):
                     duration_ms,
                     client,
                 )
-            REQUEST_ID_CTX.reset(token)
+            REQUEST_ID_CTX.reset(request_token)
+            TRACE_ID_CTX.reset(trace_token)
 
     return middleware

@@ -2,8 +2,7 @@
 
 from dataclasses import dataclass
 import os
-from typing import Any, Dict, Iterable, List, Optional
-
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -29,7 +28,8 @@ def load_openai_config() -> OpenAIConfig:
         api_key=api_key,
         gpt_model=os.getenv("OPENAI_GPT_MODEL", "gpt-4o"),
         translation_model=os.getenv("OPENAI_TRANSLATION_MODEL", "gpt-4o-mini"),
-        embedding_model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
+        embedding_model=os.getenv(
+            "OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
     )
 
 
@@ -39,6 +39,16 @@ class OpenAIClient:
     def __init__(self, config: OpenAIConfig):
         self._config = config
         self._client = OpenAI(api_key=config.api_key)
+
+    @staticmethod
+    def _prefers_max_completion_tokens(model: str) -> bool:
+        """Return True when the model expects max_completion_tokens."""
+        return model.startswith("gpt-5")
+
+    @staticmethod
+    def _supports_temperature(model: str) -> bool:
+        """Return False when the model only supports default temperature."""
+        return not model.startswith("gpt-5")
 
     @property
     def config(self) -> OpenAIConfig:
@@ -53,11 +63,45 @@ class OpenAIClient:
         **kwargs: Any,
     ):
         """Create a chat completion with the configured default model."""
+        resolved_model = model or self._config.gpt_model
+        if "max_tokens" in kwargs and "max_completion_tokens" not in kwargs:
+            if self._prefers_max_completion_tokens(resolved_model):
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+        if "temperature" in kwargs and not self._supports_temperature(resolved_model):
+            kwargs.pop("temperature", None)
         return self._client.chat.completions.create(
-            model=model or self._config.gpt_model,
+            model=resolved_model,
             messages=list(messages),
             **kwargs,
         )
+
+    def chat_completion_stream(
+        self,
+        messages: Iterable[Dict[str, Any]],
+        *,
+        model: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Iterator[str]:
+        """Stream chat completion content chunks."""
+        resolved_model = model or self._config.gpt_model
+        if "max_tokens" in kwargs and "max_completion_tokens" not in kwargs:
+            if self._prefers_max_completion_tokens(resolved_model):
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+        if "temperature" in kwargs and not self._supports_temperature(resolved_model):
+            kwargs.pop("temperature", None)
+        stream = self._client.chat.completions.create(
+            model=resolved_model,
+            messages=list(messages),
+            stream=True,
+            **kwargs,
+        )
+        for event in stream:
+            if not event.choices:
+                continue
+            delta = event.choices[0].delta
+            content = getattr(delta, "content", None)
+            if content:
+                yield content
 
     def translate(
         self,

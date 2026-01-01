@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..domain.lacan_canon import LACAN_CANON
-from ..domain.lecon_labels import LECON_LABELS
+from ..domain.lecon_labels import get_lecon_label
 
 
 @dataclass(frozen=True)
@@ -84,11 +84,11 @@ class LabelResolver:
 
     def get_lesson_label(self, lecon_raw: Optional[str]) -> str:
         """Return a friendly lesson label based on the raw lesson id."""
-        if not lecon_raw:
-            return self._unknown_lecon.get(self._language_code, self._unknown_lecon["en"])
-        labels = LECON_LABELS.get(
-            self._language_code, LECON_LABELS.get("en", {}))
-        return labels.get(lecon_raw, lecon_raw)
+        return get_lecon_label(
+            lecon_raw,
+            self._language_code,
+            self._unknown_lecon.get(self._language_code, self._unknown_lecon["en"]),
+        )
 
 
 class PromptBuilder:
@@ -115,6 +115,7 @@ class PromptBuilder:
         question: str,
         retrieved_chunks: List[Dict[str, Any]],
         language_code: str,
+        detail_level: str = "concise",
     ) -> Tuple[Optional[str], List[SourceEntry], str]:
         """Build the full prompt and return sources and context text."""
         context_parts = []
@@ -181,6 +182,34 @@ class PromptBuilder:
         }
         template_text = json.dumps(
             template_payload, ensure_ascii=False, indent=2)
+        detail_level = detail_level.lower().strip()
+        if detail_level not in ("concise", "full"):
+            detail_level = "concise"
+        if detail_level == "full":
+            quotes_instruction = "Provide 1-2 French quotes per source and a translation for each quote"
+            comparative_instruction = (
+                'Write "comparative_trajectory" as a long critical synthesis '
+                "(not a summary): 2-3 paragraphs, at least 8 sentences total and "
+                "at least 900 characters; use a Lacanian voice; highlight tensions, "
+                "shifts, or stakes across sources; explain what changes in the "
+                "conceptual position; avoid adding facts not in the context and "
+                "mark speculation explicitly"
+            )
+            brevity_instruction = ""
+        else:
+            quotes_instruction = "Provide exactly 1 French quote per source and a translation for the quote"
+            comparative_instruction = (
+                'Write "comparative_trajectory" as a concise critical synthesis '
+                "(not a summary): 3-4 sentences total; highlight the key tension "
+                "or shift across sources; avoid adding facts not in the context and "
+                "mark speculation explicitly"
+            )
+            brevity_instruction = (
+                "- Keep translation_critique to 2 short sentences.\n"
+                "- Keep context to 2-3 sentences.\n"
+                "- Keep lacanian_development to 3-4 sentences.\n"
+            )
+
         prompt = f"""
 You are a helpful assistant specialized in Jacques Lacan's work. Use only the context below to answer the question. Do not make up information.
 
@@ -194,11 +223,12 @@ Instructions:
 - Respond only in {language_name} for all string values, except the French quotes which must stay in French
 - Use every source from [1] to [{len(sources)}] in order; do not skip any source
 - The "sources" array must contain exactly {len(sources)} objects with source_index from 1 to {len(sources)}
-- Provide 1-2 French quotes per source and a translation for each quote
+- {quotes_instruction}
 - French quotes must be exact substrings from the context (copy-paste, no edits)
 - Set "language" to "{language_code}"
 - The "translation_critique" must include at least two alternative rendering
 - Write the "lacanian_development" in a Lacanian voice while avoiding facts not in the context; mark speculation explicitly
+{brevity_instruction}- {comparative_instruction}
 - If "language" is "es", avoid English words in string values (except French quotes and [n] citations)
 - Cite claims with numbered references like [1], [2], etc. inside the relevant string values
 - {self._structure_hint}
@@ -226,13 +256,20 @@ class ResponseProcessor:
         self._source_metadata_keys = source_metadata_keys
         self._translator = translator
 
-    def parse(self, response_text: str) -> Optional[Dict[str, Any]]:
+    def parse(self, response_text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Parse model output into JSON if possible."""
-        cleaned = self._repair_json_text(response_text)
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            return None
+        cleaned = self._basic_clean_json_text(response_text)
+        last_error: Optional[str] = None
+        for candidate in (cleaned, self._repair_json_text(response_text)):
+            try:
+                return json.loads(candidate), None
+            except json.JSONDecodeError as exc:
+                last_error = str(exc)
+            try:
+                return json.loads(candidate, strict=False), None
+            except json.JSONDecodeError as exc:
+                last_error = str(exc)
+        return None, last_error
 
     def normalize(
         self,
@@ -437,9 +474,13 @@ class ResponseProcessor:
             return response_text
         return response_text[start:end + 1]
 
+    @staticmethod
+    def _basic_clean_json_text(response_text: str) -> str:
+        cleaned = ResponseProcessor._extract_json_text(response_text)
+        return re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned.strip())
+
     def _repair_json_text(self, response_text: str) -> str:
-        cleaned = self._extract_json_text(response_text)
-        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned.strip())
+        cleaned = self._basic_clean_json_text(response_text)
         cleaned = cleaned.replace("“", '"').replace("”", '"')
         cleaned = cleaned.replace("‘", "'").replace("’", "'")
         cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
@@ -527,6 +568,8 @@ class AuditLogger:
         language_code: str,
         sources: List[SourceEntry],
         context_text: str,
+        *,
+        source_id: Optional[str] = None,
     ):
         """Persist the query context and sources for auditing."""
         self._audit_dir.mkdir(exist_ok=True)
@@ -536,6 +579,8 @@ class AuditLogger:
             "question_french": question_fr,
             "sources": [source.__dict__ for source in sources],
         }
+        if source_id:
+            payload["source_id"] = source_id
         (self._audit_dir / "rag_context_last.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",

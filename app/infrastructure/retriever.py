@@ -2,7 +2,9 @@
 
 from dataclasses import dataclass
 import json
+import logging
 from pathlib import Path
+import time
 from typing import Any, Dict, List, Optional
 import numpy as np
 import faiss
@@ -58,6 +60,15 @@ class OpenAIEmbedder:
         return np.array(embedding, dtype="float32").reshape(1, -1)
 
 
+def _normalize_source_id(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized.lower()
+
+
 class Retriever:
     """Combine embeddings with an index store to return scored results."""
 
@@ -65,15 +76,43 @@ class Retriever:
         self._index_store = index_store
         self._embedder = embedder
 
-    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        *,
+        source_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """Search the index for the top_k most similar chunks."""
+        logger = logging.getLogger("text_extractor_api")
+        debug = logger.isEnabledFor(logging.DEBUG)
+        total_start = time.monotonic() if debug else 0.0
+        embed_start = time.monotonic() if debug else 0.0
         query_vector = self._embedder.embed(query)
-        distances, indices = self._index_store.search(query_vector, top_k)
+        if debug:
+            embed_ms = (time.monotonic() - embed_start) * 1000.0
+        normalized_source_id = _normalize_source_id(source_id)
+        candidate_k = top_k
+        if normalized_source_id:
+            # Oversample to keep enough matches after filtering.
+            candidate_k = max(top_k, top_k * 5)
+        index_size = len(self._index_store.metadata)
+        if index_size == 0:
+            return []
+        candidate_k = min(candidate_k, index_size)
+        search_start = time.monotonic() if debug else 0.0
+        distances, indices = self._index_store.search(query_vector, candidate_k)
+        if debug:
+            search_ms = (time.monotonic() - search_start) * 1000.0
         results = []
         for i, idx in enumerate(indices[0]):
             if idx >= len(self._index_store.metadata):
                 continue
             meta = self._index_store.metadata[idx]
+            seminar = meta.get("seminar")
+            if normalized_source_id:
+                if not seminar or seminar.lower() != normalized_source_id:
+                    continue
             result = {
                 "score": float(distances[0][i]),
                 "id": self._index_store.ids[idx],
@@ -82,6 +121,21 @@ class Retriever:
                 "pages": meta.get("pages"),
             }
             results.append(result)
+            if len(results) >= top_k:
+                break
+        if debug:
+            total_ms = (time.monotonic() - total_start) * 1000.0
+            logger.debug(
+                "RAG stage=retrieval_detail total_ms=%.2f embed_ms=%.2f faiss_ms=%.2f "
+                "top_k=%s candidate_k=%s results=%s source_id=%s",
+                total_ms,
+                embed_ms,
+                search_ms,
+                top_k,
+                candidate_k,
+                len(results),
+                source_id or "-",
+            )
         return results
 
 
@@ -127,6 +181,15 @@ def reset_default_retriever() -> None:
     _RetrieverSingleton.reset()
 
 
-def search_similar_chunks(query: str, top_k: int = 5):
+def search_similar_chunks(
+    query: str,
+    top_k: int = 5,
+    *,
+    source_id: Optional[str] = None,
+):
     """Search the index for the top_k most similar chunks."""
-    return get_default_retriever().search(query, top_k=top_k)
+    return get_default_retriever().search(
+        query,
+        top_k=top_k,
+        source_id=source_id,
+    )

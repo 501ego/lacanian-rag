@@ -31,3 +31,4 @@ htmlcov/
 data_pdfs
 text_chunks_json
 rag_audit
+vector_index
